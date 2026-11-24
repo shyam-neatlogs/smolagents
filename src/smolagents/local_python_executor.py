@@ -470,35 +470,68 @@ def create_function(
 
     def new_func(*args: Any, **kwargs: Any) -> Any:
         func_state = state.copy()
-        arg_names = [arg.arg for arg in func_def.args.args]
+
+        # Build a list of inspect.Parameter objects from the AST to represent the function's signature
+        parameters = []
+
+        # Combine posonlyargs and args to handle defaults correctly
+        all_positional_params = func_def.args.posonlyargs + func_def.args.args
+        num_all_positional = len(all_positional_params)
+        num_defaults = len(func_def.args.defaults)
+        defaults_offset = num_all_positional - num_defaults
+
+        # Evaluate defaults once
         default_values = [
             evaluate_ast(d, state, static_tools, custom_tools, authorized_imports) for d in func_def.args.defaults
         ]
 
-        # Apply default values
-        defaults = dict(zip(arg_names[-len(default_values) :], default_values))
+        # Positional-only arguments
+        for i, arg in enumerate(func_def.args.posonlyargs):
+            if i >= defaults_offset:
+                default = default_values[i - defaults_offset]
+                parameters.append(inspect.Parameter(arg.arg, inspect.Parameter.POSITIONAL_ONLY, default=default))
+            else:
+                parameters.append(inspect.Parameter(arg.arg, inspect.Parameter.POSITIONAL_ONLY))
 
-        # Set positional arguments
-        for name, value in zip(arg_names, args):
-            func_state[name] = value
+        # Positional-or-keyword arguments
+        for i, arg in enumerate(func_def.args.args):
+            actual_index = len(func_def.args.posonlyargs) + i
+            if actual_index >= defaults_offset:
+                default = default_values[actual_index - defaults_offset]
+                parameters.append(
+                    inspect.Parameter(arg.arg, inspect.Parameter.POSITIONAL_OR_KEYWORD, default=default)
+                )
+            else:
+                parameters.append(inspect.Parameter(arg.arg, inspect.Parameter.POSITIONAL_OR_KEYWORD))
 
-        # Set keyword arguments
-        for name, value in kwargs.items():
-            func_state[name] = value
-
-        # Handle variable arguments
+        # *args
         if func_def.args.vararg:
-            vararg_name = func_def.args.vararg.arg
-            func_state[vararg_name] = args
+            parameters.append(inspect.Parameter(func_def.args.vararg.arg, inspect.Parameter.VAR_POSITIONAL))
 
+        # Keyword-only arguments
+        for i, arg in enumerate(func_def.args.kwonlyargs):
+            default_ast = func_def.args.kw_defaults[i]
+            if default_ast:
+                default_value = evaluate_ast(default_ast, state, static_tools, custom_tools, authorized_imports)
+                parameters.append(inspect.Parameter(arg.arg, inspect.Parameter.KEYWORD_ONLY, default=default_value))
+            else:
+                parameters.append(inspect.Parameter(arg.arg, inspect.Parameter.KEYWORD_ONLY))
+
+        # **kwargs
         if func_def.args.kwarg:
-            kwarg_name = func_def.args.kwarg.arg
-            func_state[kwarg_name] = kwargs
+            parameters.append(inspect.Parameter(func_def.args.kwarg.arg, inspect.Parameter.VAR_KEYWORD))
 
-        # Set default values for arguments that were not provided
-        for name, value in defaults.items():
-            if name not in func_state:
-                func_state[name] = value
+        signature = inspect.Signature(parameters)
+
+        try:
+            bound_args = signature.bind(*args, **kwargs)
+            bound_args.apply_defaults()
+        except TypeError as e:
+            # Re-raise as InterpreterError to be caught by the executor's error handling
+            error_message = str(e).replace("parameter", "argument")
+            raise InterpreterError(f"{func_def.name}() {error_message}")
+
+        func_state.update(bound_args.arguments)
 
         # Update function state with self and __class__
         if func_def.args.args and func_def.args.args[0].arg == "self":
