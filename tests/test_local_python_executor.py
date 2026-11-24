@@ -978,11 +978,12 @@ var_args_method(1, 2, 3, x=4, y=5)
 """
         state = {}
         result, _ = evaluate_python_code(code, {"sum": sum}, state=state)
-        assert result == 15
+        # As in CPython: `self` takes 1, so *args is (2, 3): 5 + 9.
+        assert result == 14
 
     def test_exceptions(self):
         code = """
-def method_that_raises(self):
+def method_that_raises():
     raise ValueError("An error occurred")
 
 try:
